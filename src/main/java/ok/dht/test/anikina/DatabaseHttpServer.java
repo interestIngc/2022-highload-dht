@@ -21,6 +21,7 @@ import org.apache.commons.logging.LogFactory;
 import java.io.IOException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
@@ -29,6 +30,7 @@ public class DatabaseHttpServer extends HttpServer {
 
     private static final int THREADS_MIN = 8;
     private static final int THREAD_MAX = 10;
+    private static final int KEEP_ALIVE_TIME_MS = 10;
     private static final int MAX_QUEUE_SIZE = 128;
     private static final int TERMINATION_TIMEOUT_MS = 800;
     private static final long FLUSH_THRESHOLD_BYTES = 4 * 1024 * 1024;
@@ -37,7 +39,7 @@ public class DatabaseHttpServer extends HttpServer {
             new ThreadPoolExecutor(
                     THREADS_MIN,
                     THREAD_MAX,
-                    0,
+                    KEEP_ALIVE_TIME_MS,
                     TimeUnit.MILLISECONDS,
                     new LinkedBlockingQueue<>(MAX_QUEUE_SIZE),
                     new ThreadPoolExecutor.AbortPolicy()
@@ -60,16 +62,20 @@ public class DatabaseHttpServer extends HttpServer {
     }
 
     @Override
-    public void handleRequest(Request request, final HttpSession session) {
-        executorService.execute(() -> {
-            try {
-                session.sendResponse(processRequest(request));
-            } catch (IOException e) {
-                if (log.isDebugEnabled()) {
-                    log.debug(e.getMessage());
+    public void handleRequest(Request request, final HttpSession session) throws IOException {
+        try {
+            executorService.execute(() -> {
+                try {
+                    session.sendResponse(processRequest(request));
+                } catch (IOException e) {
+                    if (log.isDebugEnabled()) {
+                        log.debug(e.getMessage());
+                    }
                 }
-            }
-        });
+            });
+        } catch (RejectedExecutionException e) {
+            session.sendResponse(new Response(Response.SERVICE_UNAVAILABLE, Response.EMPTY));
+        }
     }
 
     @Override
@@ -83,8 +89,6 @@ public class DatabaseHttpServer extends HttpServer {
     }
 
     public void close() throws IOException {
-        stop();
-
         executorService.shutdown();
         try {
             if (!executorService.awaitTermination(TERMINATION_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
@@ -92,8 +96,10 @@ public class DatabaseHttpServer extends HttpServer {
             }
         } catch (InterruptedException e) {
             executorService.shutdownNow();
+            Thread.currentThread().interrupt();
         }
 
+        stop();
         dao.close();
     }
 
