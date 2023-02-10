@@ -5,7 +5,6 @@ import ok.dht.ServiceConfig;
 import ok.dht.test.anikina.consistenthashing.ConsistentHashingImpl;
 import ok.dht.test.anikina.dao.Entry;
 import ok.dht.test.anikina.replication.ReplicationParameters;
-import ok.dht.test.anikina.streaming.ChunkedResponse;
 import ok.dht.test.anikina.streaming.StreamingHttpSession;
 import ok.dht.test.anikina.utils.RequestUtils;
 import ok.dht.test.anikina.utils.Utils;
@@ -28,16 +27,15 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.util.Arrays;
-import java.util.Comparator;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -54,6 +52,7 @@ public class DatabaseHttpServer extends HttpServer {
 
     private static final int HTTP_SERVICE_THREADS = 3;
     private static final int DAO_SERVICE_THREADS = 3;
+    private static final int KEEP_ALIVE_TIME_MS = 10;
     private static final int MAX_QUEUE_SIZE = 128;
     private static final int TERMINATION_TIMEOUT_MS = 800;
 
@@ -67,7 +66,7 @@ public class DatabaseHttpServer extends HttpServer {
             new ThreadPoolExecutor(
                     HTTP_SERVICE_THREADS,
                     HTTP_SERVICE_THREADS,
-                    0,
+                    KEEP_ALIVE_TIME_MS,
                     TimeUnit.MILLISECONDS,
                     new LinkedBlockingQueue<>(MAX_QUEUE_SIZE),
                     new ThreadPoolExecutor.AbortPolicy()
@@ -107,29 +106,30 @@ public class DatabaseHttpServer extends HttpServer {
     }
 
     @Override
-    public void handleRequest(Request request, final HttpSession session) {
-        httpRequestService.execute(() -> {
-            try {
-                if (!SUPPORTED_METHODS.contains(request.getMethod())) {
-                    session.sendResponse(new Response(Response.METHOD_NOT_ALLOWED, Response.EMPTY));
-                    return;
-                }
+    public void handleRequest(Request request, final HttpSession session) throws IOException {
+        try {
+            httpRequestService.execute(() -> {
+                try {
+                    if (!SUPPORTED_METHODS.contains(request.getMethod())) {
+                        session.sendResponse(new Response(Response.METHOD_NOT_ALLOWED, Response.EMPTY));
+                        return;
+                    }
 
-                switch (request.getPath()) {
-                    case SYNCHRONIZATION_PATH ->
-                            processSynchronizationRequest(request, session);
-                    case QUERY_PATH ->
-                            processQueryRequest(request, session);
-                    case STREAMING_PATH -> processStreamingRequest(request, session);
-                    default ->
-                            session.sendResponse(new Response(Response.BAD_REQUEST, Response.EMPTY));
+                    switch (request.getPath()) {
+                        case SYNCHRONIZATION_PATH -> processSynchronizationRequest(request, session);
+                        case QUERY_PATH -> processQueryRequest(request, session);
+                        case STREAMING_PATH -> processStreamingRequest(request, session);
+                        default -> session.sendResponse(new Response(Response.BAD_REQUEST, Response.EMPTY));
+                    }
+                } catch (IOException e) {
+                    if (log.isDebugEnabled()) {
+                        log.debug(e.getMessage());
+                    }
                 }
-            } catch (IOException e) {
-                if (log.isDebugEnabled()) {
-                    log.debug(e.getMessage());
-                }
-            }
-        });
+            });
+        } catch (RejectedExecutionException e) {
+            session.sendResponse(new Response(Response.SERVICE_UNAVAILABLE, Response.EMPTY));
+        }
     }
 
     private void processStreamingRequest(Request request, final HttpSession session) throws IOException {
@@ -283,18 +283,17 @@ public class DatabaseHttpServer extends HttpServer {
     }
 
     public void close() throws IOException {
-        stop();
-
         httpRequestService.shutdown();
         try {
             if (!httpRequestService.awaitTermination(TERMINATION_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
                 httpRequestService.shutdownNow();
             }
         } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
             httpRequestService.shutdownNow();
+            Thread.currentThread().interrupt();
         }
 
+        stop();
         requestHandler.close();
     }
 }
