@@ -47,11 +47,6 @@ dependencies {
 // Use JDK Incubator Foreign module (for MemorySegment users)
 def incubatorArgs = ["--add-modules", "jdk.incubator.foreign"]
 
-application {
-    mainClass = 'ok.dht.test.pashchenko.DemoServer'
-    applicationDefaultJvmArgs = ['-Xmx128m'] + incubatorArgs
-}
-
 test {
     maxHeapSize = "128m"
     useJUnitPlatform()
